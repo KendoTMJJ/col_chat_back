@@ -22,6 +22,8 @@ import { JoinConversationDto } from './dto/join-conversation.dto';
 import { CreateConversationDto } from '../conversations/dto/create-conversation.dto';
 import type { Message } from '../messages/interfaces/message.interface';
 import { RagResponse } from '../rag/interfaces/rag-response.interface';
+import type { UserSession } from '../sessions/session.model';
+import * as jwt from 'jsonwebtoken';
 
 const ROOM = (conversationId: string) => `conv:${conversationId}`;
 
@@ -39,22 +41,80 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {}
 
   // ─── Ciclo de vida  ───────────────────────────────────
-
   handleConnection(client: Socket): void {
-    const userId = client.handshake.query.userId as string;
+    const token = client.handshake.auth?.token as string;
+    // const userId = client.handshake.auth?.userId as string;
+    const tabId = client.handshake.auth?.tabId as string;
 
-    if (!userId) {
-      client.emit('error', { message: 'userId requerido en query params' });
+    if (!token || !tabId) {
+      client.emit('error', { message: 'token y tabId requeridos' });
       client.disconnect();
       return;
     }
 
-    const session = this.sessionsService.createOrReconnect(userId, client.id);
+    // Verificar JWT del sistema Express
+    let payload: {
+      id: number;
+      username: string;
+      rol: string;
+      pais_id: number | null;
+    };
+
+    try {
+      this.logger.log(`Token recibido: ${token.substring(0, 20)}`);
+      this.logger.log(
+        `Secret usado: ${process.env.JWT_SECRET?.substring(0, 10)}`,
+      );
+
+      payload = jwt.verify(token, process.env.JWT_SECRET as string) as {
+        id: number;
+        username: string;
+        rol: string;
+        pais_id: number | null;
+      };
+    } catch (e) {
+      this.logger.error(`JWT error: ${(e as Error).message}`);
+      client.emit('error', { message: 'Token inválido o expirado' });
+      client.disconnect();
+      return;
+    }
+
+    const userId = String(payload.id);
+    const rol = payload.rol;
+
+    const session = this.sessionsService.createOrReconnect(
+      userId,
+      tabId,
+      client.id,
+      rol,
+    );
+
     client.data.userId = userId;
+    client.data.tabId = tabId;
     client.data.sessionId = session.sessionId;
 
+    client.join(session.sessionId); // sala
+    session.sockets.add(client.id); // registro
+
     client.emit('session:ready', { sessionId: session.sessionId, userId });
-    this.logger.log(`Cliente conectado: ${userId} → socket ${client.id}`);
+    this.logger.log(
+      `Cliente conectado: ${userId} | tab: ${tabId} → socket ${client.id}`,
+    );
+
+    // Indicar al front que el bot está activo
+    client.emit('bot-status', { online: true });
+
+    if (session.history.length > 0) {
+      client.emit('session:history', { messages: session.history });
+    } else {
+      const welcome = '👋 Hola, soy tu asistente. ¿En qué puedo ayudarte?';
+      session.history.push({ sender: 'bot', message: welcome });
+      client.emit('on-message', {
+        userId: 'bot',
+        sender: 'bot',
+        message: welcome,
+      });
+    }
   }
 
   handleDisconnect(client: Socket): void {
@@ -63,11 +123,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Notificar a todas las salas en las que estaba el usuario
     const userId = client.data.userId;
     if (userId) {
-      this.conversationsService
-        .findByParticipant(userId)
-        .forEach(conv => {
-          client.to(ROOM(conv.id)).emit('user:left', { userId, conversationId: conv.id });
-        });
+      this.conversationsService.findByParticipant(userId).forEach((conv) => {
+        client
+          .to(ROOM(conv.id))
+          .emit('user:left', { userId, conversationId: conv.id });
+      });
     }
   }
 
@@ -90,6 +150,9 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Unir al creador automáticamente
     client.join(ROOM(conversation.id));
     client.emit('conversation:created', conversation);
+
+    const session = this.sessionsService.findBySocketId(client.id);
+    if (session) session.conversationId = conversation.id;
 
     return conversation;
   }
@@ -142,6 +205,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() dto: SendMessageDto,
   ) {
     const userId = client.data.userId as string;
+    const session = this.sessionsService.findBySocketId(client.id);
+    if (session) {
+      session.history.push({ sender: 'user', message: dto.content });
+    }
 
     // Guardar sesión activa (Phase 1 touch)
     this.sessionsService.touch(client.data.sessionId);
@@ -166,36 +233,49 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @OnEvent(SessionEvents.MESSAGE_CREATED)
   broadcastNewMessage(message: Message): void {
-    // DECISIÓN: el broadcast ocurre vía evento y no directamente en el handler de WebSocket. Así otros 
+    // DECISIÓN: el broadcast ocurre vía evento y no directamente en el handler de WebSocket. Así otros
     // productores (e.g. un HTTP controller) también pueden crear mensajes y verlos reflejados en tiempo real.
     if (message.type !== 'user') return;
 
-    this.server
-      .to(ROOM(message.conversationId))
-      .emit('message:new', message);
+    this.server.to(ROOM(message.conversationId)).emit('message:new', message);
   }
 
   @OnEvent(SessionEvents.RAG_RESPONSE_RECEIVED)
-  broadcastRagResponse({ ragMessage }: { ragResponse: RagResponse; ragMessage: Message }): void {
-    // El mensaje RAG ya fue persistido por RagService antes de emitir el evento.
-    // Aquí solo se distribuye a los clientes de la sala.
-    this.server
-      .to(ROOM(ragMessage.conversationId))
-      .emit('message:rag', ragMessage);
+  broadcastRagResponse({
+    ragMessage,
+  }: {
+    ragResponse: RagResponse;
+    ragMessage: Message;
+  }): void {
+    const session = this.sessionsService.findByConversationId(
+      ragMessage.conversationId,
+    );
+
+    if (session) {
+      this.server.to(session.sessionId).emit('message:rag', ragMessage);
+      session.history.push({ sender: 'bot', message: ragMessage.content });
+    }
   }
 
   @OnEvent(SessionEvents.RAG_ERROR)
   notifyRagError(payload: { conversationId: string; error: string }): void {
-    this.server
-      .to(ROOM(payload.conversationId))
-      .emit('rag:error', { message: 'El servicio RAG no pudo responder', detail: payload.error });
+    const session = this.sessionsService.findByConversationId(
+      payload.conversationId,
+    );
+    if (session) {
+      this.server.to(session.sessionId).emit('rag:error', {
+        message: 'El servicio RAG no pudo responder',
+        detail: payload.error,
+      });
+    }
   }
 
   @OnEvent(SessionEvents.SESSION_EXPIRED)
-  handleSessionExpired(session: { userId: string }): void {
-    // Notificar al usuario vía su sala personal (definida en Phase 1)
-    this.server
-      .to(`user:${session.userId}`)
-      .emit('session:expired', { message: 'Sesión expirada. Reconéctate.' });
+  handleSessionExpired(session: UserSession): void {
+    for (const socketId of session.sockets) {
+      this.server.to(socketId).emit('session:expired', {
+        message: 'Tu sesión expiró. Refresca la página para continuar.',
+      });
+    }
   }
 }

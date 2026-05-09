@@ -10,7 +10,7 @@ import { RagRequest, RagResponse } from './interfaces/rag-response.interface';
 
 // DECISIÓN: RAG_SERVICE_URL se externaliza a variables de entorno.
 // En producción usar ConfigService de @nestjs/config.
-const RAG_SERVICE_URL = process.env.RAG_SERVICE_URL ?? 'http://localhost:8000';
+const RAG_SERVICE_URL = String(process.env.RAG_SERVICE_URL);
 
 // DECISIÓN: solo los mensajes de tipo 'user' disparan el RAG.
 // Los mensajes 'rag' y 'system' no deben crear ciclos de llamada.
@@ -30,13 +30,17 @@ export class RagService {
   async handleMessageCreated(message: Message): Promise<void> {
     if (!RAG_ELIGIBLE_TYPES.has(message.type)) return;
 
-    const context = this.messagesService.getContext(message.conversationId, 10);
+    // ─── MODO REAL: RAG maneja su propia memoria por session_id ─────────────
+    // const context = this.messagesService.getContext(message.conversationId, 10);
+
+    // ─── MODO SIMULADO: descomentar si se quiere pasar contexto manual ───────
+    // const context = this.messagesService.getContext(message.conversationId, 10);
 
     const request: RagRequest = {
       conversationId: message.conversationId,
       messageId: message.id,
       query: message.content,
-      context,
+      // context,
     };
 
     this.eventEmitter.emit(SessionEvents.RAG_REQUEST_SENT, request);
@@ -72,36 +76,57 @@ export class RagService {
   private async callRagEndpoint(request: RagRequest): Promise<RagResponse> {
     const start = Date.now();
 
-    // ─── MODO SIMULADO ──────────────────────────────────────────────────────
-    // DECISIÓN: la simulación replica la latencia real (~300-800ms) y el
-    // contrato de respuesta del endpoint RAG. 
-    // Reemplazar por el bloque HTTP real de abajo cuando el servicio RAG esté disponible.
-    await this.simulateLatency();
+    // ─── MODO REAL ───────────────────────────────────────────────────────────
+    const { data } = await firstValueFrom(
+      this.httpService.post<{ respuesta: string }>(
+        `${RAG_SERVICE_URL}/rag_memory/`,
+        {
+          session_id: request.conversationId,
+          consulta: request.query,
+        },
+      ),
+    );
 
     return {
       conversationId: request.conversationId,
       originMessageId: request.messageId,
-      answer: `[RAG simulado] Respuesta para: "${request.query}"`,
-      sources: ['doc-001', 'doc-042'],
-      confidence: 0.87,
+      answer: data.respuesta,
       latencyMs: Date.now() - start,
     };
-    // ────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
 
-    // ─── MODO REAL (descomentar cuando RAG esté disponible) ─────────────────
-    // const { data } = await firstValueFrom(
-    //   this.httpService.post<RagResponse>(`${RAG_SERVICE_URL}/query`, {
-    //     query: request.query,
-    //     conversation_id: request.conversationId,
-    //     context: request.context,
-    //   }),
-    // );
-    // return { ...data, latencyMs: Date.now() - start };
-    // ────────────────────────────────────────────────────────────────────────
+    // ─── MODO SIMULADO ───────────────────────────────────────────────────────
+    // await this.simulateLatency();
+    // return {
+    //   conversationId: request.conversationId,
+    //   originMessageId: request.messageId,
+    //   answer: `[RAG simulado] Respuesta para: "${request.query}"`,
+    //   sources: ['doc-001', 'doc-042'],
+    //   confidence: 0.87,
+    //   latencyMs: Date.now() - start,
+    // };
+    // ─────────────────────────────────────────────────────────────────────────
   }
 
   private simulateLatency(): Promise<void> {
     const ms = 300 + Math.random() * 500;
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async uploadDocument(
+    file: Express.Multer.File,
+  ): Promise<{ message: string }> {
+    const formData = new FormData();
+    formData.append(
+      'file',
+      new Blob([new Uint8Array(file.buffer)], { type: file.mimetype }), // ← Uint8Array en vez de cast
+      file.originalname,
+    );
+
+    await firstValueFrom(
+      this.httpService.post(`${RAG_SERVICE_URL}/documentos/`, formData),
+    );
+
+    return { message: 'Documento subido correctamente' };
   }
 }
