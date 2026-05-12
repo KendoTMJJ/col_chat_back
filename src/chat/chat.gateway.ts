@@ -61,11 +61,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     };
 
     try {
-      this.logger.log(`Token recibido: ${token.substring(0, 20)}`);
-      this.logger.log(
-        `Secret usado: ${process.env.JWT_SECRET?.substring(0, 10)}`,
-      );
-
       payload = jwt.verify(token, process.env.JWT_SECRET as string) as {
         id: number;
         username: string;
@@ -265,7 +260,6 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (session) {
       this.server.to(session.sessionId).emit('rag:error', {
         message: 'El servicio RAG no pudo responder',
-        detail: payload.error,
       });
     }
   }

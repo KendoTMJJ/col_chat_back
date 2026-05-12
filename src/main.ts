@@ -4,9 +4,12 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  let port: number = Number(process.env.PORT);
+  const port: number = Number(process.env.PORT) || 3225;
+  const corsOrigins = process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',')
+    : '*';
 
-  app.enableCors({ origin: '*' });
+  app.enableCors({ origin: corsOrigins });
 
   const config = new DocumentBuilder()
     .setTitle('Chat Service')

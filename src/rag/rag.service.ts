@@ -7,13 +7,8 @@ import { SessionEvents } from '../events/app-events.enum';
 import type { Message } from '../messages/interfaces/message.interface';
 import { MessagesService } from '../messages/messages.service';
 import { RagRequest, RagResponse } from './interfaces/rag-response.interface';
+import { ConfigService } from '@nestjs/config';
 
-// DECISIÓN: RAG_SERVICE_URL se externaliza a variables de entorno.
-// En producción usar ConfigService de @nestjs/config.
-const RAG_SERVICE_URL = String(process.env.RAG_SERVICE_URL);
-
-// DECISIÓN: solo los mensajes de tipo 'user' disparan el RAG.
-// Los mensajes 'rag' y 'system' no deben crear ciclos de llamada.
 const RAG_ELIGIBLE_TYPES = new Set<string>(['user']);
 
 @Injectable()
@@ -24,6 +19,7 @@ export class RagService {
     private readonly httpService: HttpService,
     private readonly messagesService: MessagesService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly configService: ConfigService,
   ) {}
 
   @OnEvent(SessionEvents.MESSAGE_CREATED, { async: true })
@@ -76,15 +72,18 @@ export class RagService {
   private async callRagEndpoint(request: RagRequest): Promise<RagResponse> {
     const start = Date.now();
 
+    const ragUrl = this.configService.get<string>('RAG_SERVICE_URL');
+
+    if (!ragUrl) {
+      throw new Error('RAG_SERVICE_URL no definida');
+    }
+
     // ─── MODO REAL ───────────────────────────────────────────────────────────
     const { data } = await firstValueFrom(
-      this.httpService.post<{ respuesta: string }>(
-        `${RAG_SERVICE_URL}/rag_memory/`,
-        {
-          session_id: request.conversationId,
-          consulta: request.query,
-        },
-      ),
+      this.httpService.post<{ respuesta: string }>(`${ragUrl}/rag_memory/`, {
+        session_id: request.conversationId,
+        consulta: request.query,
+      }),
     );
 
     return {
@@ -117,6 +116,7 @@ export class RagService {
     file: Express.Multer.File,
   ): Promise<{ message: string }> {
     const formData = new FormData();
+    const ragUrl = this.configService.get<string>('RAG_SERVICE_URL');
     formData.append(
       'file',
       new Blob([new Uint8Array(file.buffer)], { type: file.mimetype }), // ← Uint8Array en vez de cast
@@ -124,7 +124,7 @@ export class RagService {
     );
 
     await firstValueFrom(
-      this.httpService.post(`${RAG_SERVICE_URL}/documentos/`, formData),
+      this.httpService.post(`${ragUrl}/documentos/`, formData),
     );
 
     return { message: 'Documento subido correctamente' };

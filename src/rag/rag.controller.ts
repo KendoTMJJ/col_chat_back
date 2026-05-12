@@ -16,7 +16,15 @@ export class RagController {
   constructor(private readonly ragService: RagService) {}
 
   @Post('upload')
-  @UseInterceptors(FileInterceptor('file'))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 25 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        const allowed = /\.(xlsx|xls|pdf|doc|docx|ppt|pptx)$/i;
+        cb(null, allowed.test(file.originalname));
+      },
+    }),
+  )
   async uploadDocument(
     @UploadedFile() file: Express.Multer.File,
     @Req() req: Request & { headers: { authorization?: string } },
