@@ -113,6 +113,21 @@ export class SessionsService {
     return Date.now() - session.lastActivityAt.getTime() > SESSION_TTL_MS;
   }
 
+  // ─── Reset de conversación ────────────────────────────────────────────────
+
+  resetConversation(sessionId: string): UserSession | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+
+    session.history = [];
+    session.conversationId = null;
+    session.lastActivityAt = new Date();
+
+    this.eventEmitter.emit(SessionEvents.CONVERSATION_RESET, session);
+    this.logger.log(`Conversación reiniciada: sesión ${sessionId}`);
+    return session;
+  }
+
   // ─── Consultas ────────────────────────────────────────────────────────────
 
   findBySocketId(socketId: string): UserSession | undefined {

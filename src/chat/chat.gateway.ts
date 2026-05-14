@@ -42,17 +42,15 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   // ─── Ciclo de vida  ───────────────────────────────────
   handleConnection(client: Socket): void {
-    const token = client.handshake.auth?.token as string;
-    // const userId = client.handshake.auth?.userId as string;
+    const token = client.handshake.auth?.token as string | undefined;
     const tabId = client.handshake.auth?.tabId as string;
 
-    if (!token || !tabId) {
-      client.emit('error', { message: 'token y tabId requeridos' });
+    if (!tabId) {
+      client.emit('error', { message: 'tabId requerido' });
       client.disconnect();
       return;
     }
 
-    // Verificar JWT del sistema Express
     let payload: {
       id: number;
       username: string;
@@ -60,18 +58,30 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       pais_id: number | null;
     };
 
-    try {
-      payload = jwt.verify(token, process.env.JWT_SECRET as string) as {
-        id: number;
-        username: string;
-        rol: string;
-        pais_id: number | null;
+    if (token) {
+      // Usuario autenticado: validar JWT
+      try {
+        payload = jwt.verify(token, process.env.JWT_SECRET as string) as {
+          id: number;
+          username: string;
+          rol: string;
+          pais_id: number | null;
+        };
+      } catch (e) {
+        this.logger.error(`JWT error: ${(e as Error).message}`);
+        client.emit('error', { message: 'Token inválido o expirado' });
+        client.disconnect();
+        return;
+      }
+    } else {
+      // Visitante anónimo: sesión temporal sin credenciales
+      const anonSuffix = (Date.now() % 1_000_000).toString(36).toUpperCase();
+      payload = {
+        id: Date.now(),
+        username: `Visitante-${anonSuffix}`,
+        rol: 'guest',
+        pais_id: null,
       };
-    } catch (e) {
-      this.logger.error(`JWT error: ${(e as Error).message}`);
-      client.emit('error', { message: 'Token inválido o expirado' });
-      client.disconnect();
-      return;
     }
 
     const userId = String(payload.id);
@@ -192,6 +202,52 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     return { left: true };
+  }
+
+  @SubscribeMessage('admin:stats')
+  handleAdminStats(@ConnectedSocket() client: Socket) {
+    const session = this.sessionsService.findBySocketId(client.id);
+    if (!session || !['admin', 'superadmin'].includes(session.rol)) {
+      return { error: 'Unauthorized' };
+    }
+
+    const allSessions = this.sessionsService.getAll();
+    const activeSessions = allSessions.filter(s => s.isActive);
+    const conversations = this.conversationsService.findAll();
+    const totalMessages = conversations.reduce(
+      (acc, conv) => acc + this.messagesService.findByConversation(conv.id).length,
+      0,
+    );
+
+    return {
+      activeSessions: activeSessions.length,
+      totalSessions: allSessions.length,
+      totalConversations: conversations.length,
+      totalMessages,
+      sessions: allSessions.map(s => ({
+        userId: s.userId,
+        rol: s.rol,
+        connectedAt: s.connectedAt,
+        lastActivityAt: s.lastActivityAt,
+        historyLength: s.history.length,
+        isActive: s.isActive,
+      })),
+    };
+  }
+
+  @SubscribeMessage('conversation:reset')
+  handleResetConversation(@ConnectedSocket() client: Socket) {
+    const session = this.sessionsService.findBySocketId(client.id);
+    if (!session) return { ok: false };
+
+    // Salir de la sala de la conversación actual
+    if (session.conversationId) {
+      client.leave(ROOM(session.conversationId));
+    }
+
+    this.sessionsService.resetConversation(client.data.sessionId as string);
+    client.emit('conversation:reset', { ok: true });
+    return { ok: true };
   }
 
   @SubscribeMessage('message:send')

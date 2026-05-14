@@ -10,6 +10,7 @@ export enum SessionEvents {
   CONVERSATION_CREATED     = 'conversation.created',
   CONVERSATION_USER_JOINED = 'conversation.user.joined',
   CONVERSATION_USER_LEFT   = 'conversation.user.left',
+  CONVERSATION_RESET       = 'conversation.reset',
 
   // ─── Phase 2: Messages ───────────────────────────────────────
   MESSAGE_CREATED   = 'message.created',
