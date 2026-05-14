@@ -42,7 +42,14 @@ export class RagService {
     this.eventEmitter.emit(SessionEvents.RAG_REQUEST_SENT, request);
 
     try {
-      const ragResponse = await this.callRagEndpoint(request);
+      let ragResponse;
+      try {
+        ragResponse = await this.callRagEndpoint(request);
+      } catch (firstError) {
+        this.logger.warn(`Primer intento RAG fallido (${(firstError as Error).message}), reintentando...`);
+        await new Promise(r => setTimeout(r, 2000));
+        ragResponse = await this.callRagEndpoint(request);
+      }
 
       // Persiste la respuesta como mensaje de tipo 'rag'
       const ragMessage = this.messagesService.createRagMessage(

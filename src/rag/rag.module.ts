@@ -11,7 +11,7 @@ import { JwtModule } from '@nestjs/jwt';
       secret: String(process.env.JWT_SECRET),
     }),
     HttpModule.register({
-      timeout: 60000,
+      timeout: 120000,
       maxRedirects: 5,
     }),
     MessagesModule,
