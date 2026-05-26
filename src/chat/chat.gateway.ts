@@ -68,10 +68,27 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           pais_id: number | null;
         };
       } catch (e) {
-        this.logger.error(`JWT error: ${(e as Error).message}`);
-        client.emit('error', { message: 'Token inválido o expirado' });
-        client.disconnect();
-        return;
+        const isExpired = (e as Error).name === 'TokenExpiredError';
+        if (isExpired) {
+          // Token expirado: degradar a invitado en lugar de desconectar
+          this.logger.warn(`Token expirado, conectando como invitado`);
+          const anonSuffix = (Date.now() % 1_000_000).toString(36).toUpperCase();
+          payload = {
+            id: Date.now(),
+            username: `Visitante-${anonSuffix}`,
+            rol: 'guest',
+            pais_id: null,
+          };
+          client.emit('auth:downgraded', {
+            message: 'Tu sesión expiró. Conectado como invitado.',
+          });
+        } else {
+          // Token malformado o con firma inválida: rechazar
+          this.logger.error(`JWT inválido: ${(e as Error).message}`);
+          client.emit('error', { message: 'Token inválido' });
+          client.disconnect();
+          return;
+        }
       }
     } else {
       // Visitante anónimo: sesión temporal sin credenciales
